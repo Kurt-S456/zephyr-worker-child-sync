@@ -1,0 +1,68 @@
+# Repository-wide ignores
+
+# Zephyr and CMake build artifacts
+build/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# PlatformIO
+.pio/
+.pioenvs/
+/.pio/
+
+# VS Code
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# General binary/build files
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# Logs, temporary files, editor backup
+*.log
+*.tmp
+*.swp
+~
+*.bak
+*.orig
+*.save
+.DS_Store
+
+# debugger / indexer caches
+.cache/
+.vscode/
+.ccls-cache/
+.ninja_deps
+.ninja_log
+
+# west & SDK
+west/
+sdk/
+
+# Test / coverage
+.pytest_cache/
+coverage.xml
+
+# Ignore node_modules if any
+node_modules/
+
+# Ignore environment files
+.env
+venv/
+env/

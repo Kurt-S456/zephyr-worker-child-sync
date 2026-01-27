@@ -20,6 +20,8 @@ static const struct device *spi_dev(void)
 	return dev;
 }
 
+/*
+*/
 static int spi_exchange(const struct device *spi, const uint8_t *tx, size_t tx_len,
 						uint8_t *rx, size_t rx_len, const struct spi_config *cfg)
 {
