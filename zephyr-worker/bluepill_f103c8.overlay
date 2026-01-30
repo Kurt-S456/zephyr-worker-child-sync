@@ -1,0 +1,6 @@
+/ {
+    aliases {
+        child-select1 = &cs1;
+    };
+
+}
