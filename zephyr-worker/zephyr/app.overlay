@@ -1,0 +1,16 @@
+&gpiob {
+    status = "okay";
+};
+
+/ {
+    aliases {
+        cs1 = &cs1_pin_node;
+    };
+    cs_signals {
+        compatible = "gpio-keys";
+        cs1_pin_node: cs1_pin_node {
+            gpios = <&gpiob 0 GPIO_ACTIVE_LOW>;
+            label = "CS1";
+        };
+    };
+};

@@ -50,6 +50,7 @@ void configure_cs_pin(void)
 
 void configure_led_pin(void)
 {
+	gpio_pin_configure_dt(&led0, GPIO_OUTPUT_INACTIVE);
 	if (!device_is_ready(led0.port)) {
 		printk("Error: GPIO device not ready\n");
 		return;

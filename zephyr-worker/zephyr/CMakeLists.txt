@@ -4,3 +4,5 @@ project(zephyr-worker)
 
 FILE(GLOB app_sources ../src/*.c*)
 target_sources(app PRIVATE ${app_sources})
+
+set(DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/app.overlay)
