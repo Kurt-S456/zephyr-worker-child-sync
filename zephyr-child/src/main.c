@@ -1,96 +1,41 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/sys/atomic.h>
 
-#define CS_NODE DT_ALIAS(cs1)
-#define LED_NODE DT_ALIAS(led0)
+const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi1));
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+// SPI Config for Slave
+static const struct spi_config spi_cfg = {
+    .operation = SPI_WORD_SET(8) | SPI_OP_MODE_SLAVE | SPI_TRANSFER_MSB,
+    .frequency = 1000000,
+    .slave = 0,
+};
 
-#if !DT_NODE_HAS_STATUS(CS_NODE, okay)
-#error "Unsupported board: cs1 devicetree alias is not defined"
-#endif
+int main(void) {
+    uint8_t rx_byte;
+    struct spi_buf rx_buf = { .buf = &rx_byte, .len = 1 };
+    struct spi_buf_set rx_bufs = { .buffers = &rx_buf, .count = 1 };
 
-#if !DT_NODE_HAS_STATUS(LED_NODE, okay)
-#error "Unsupported board: led0 devicetree alias is not defined"
-#endif
+    gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
 
-static const struct gpio_dt_spec cs1 = GPIO_DT_SPEC_GET(CS_NODE, gpios);
-static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(LED_NODE, gpios);
-
-// GPIO callback structure
-static struct gpio_callback cs_callback;
-
-struct k_work child_work;
-
-atomic_t pin_state_flag;
-
-void led_work_handler(struct k_work *work)
-{
-    // Read the physical state of the pin
-   int state = (int)atomic_get(&pin_state_flag);
-    
-    gpio_pin_set_dt(&led0, state);
-    printk("Work Queue processed state: %d\n", state);
-}
-
-void configure_cs_pin(void)
-{
-	if (!device_is_ready(cs1.port)) {
-		printk("Error: GPIO device not ready\n");
-		return;
+	if(device_is_ready(spi_dev) == false) {
+		printk("SPI device not ready\n");
+		return -1;
 	}
 
-	int ret = gpio_pin_configure_dt(&cs1, GPIO_INPUT | GPIO_PULL_UP);
-	if (ret != 0) {
-		printk("Error %d: failed to configure CS pin\n", ret);
-		return;
+	if(device_is_ready(led.port) == false) {
+		printk("LED device not ready\n");
+		return -1;
 	}
-}
 
-void configure_led_pin(void)
-{
-	gpio_pin_configure_dt(&led0, GPIO_OUTPUT_INACTIVE);
-	if (!device_is_ready(led0.port)) {
-		printk("Error: GPIO device not ready\n");
-		return;
-	}
-}
-
-void cs_isr_handler(const struct device *dev, 
-					struct gpio_callback *cb, 
-					uint32_t pins)
-{
-	int val = gpio_pin_get_dt(&cs1);
-
-	atomic_set(&pin_state_flag, (atomic_val_t)val);
-    
-    k_work_submit(&child_work);
-	
-}
-
-int main(void)
-{
-	configure_cs_pin();
-	configure_led_pin();
-
-	// Initialize work item
-	k_work_init(&child_work, led_work_handler);
-
-    int ret = gpio_pin_interrupt_configure_dt(&cs1, GPIO_INT_EDGE_BOTH);
-    if (ret != 0) {
-        printk("Error %d: failed to configure interrupt\n", ret);
-        return -1;
-    }
-
-    // 2. Initialize and add callback
-    gpio_init_callback(&cs_callback, cs_isr_handler, BIT(cs1.pin));
-    gpio_add_callback(cs1.port, &cs_callback);
-
-    printk("CS pin interrupt armed\n");
+	printk("SPI Slave Example Started\n");
 
     while (1) {
-        k_sleep(K_FOREVER);
+		gpio_pin_set_dt(&led, 0);
+        spi_read(spi_dev, &spi_cfg, &rx_bufs);
+		gpio_pin_set_dt(&led, 1);
+        printk("Slave Received: 0x%02X\n", rx_byte);
+		k_sleep(K_MSEC(500));
     }
-	return 0;
 }
