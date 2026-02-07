@@ -18,29 +18,36 @@ static const struct gpio_dt_spec cs_gpios[] = {
     GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 3),
 };
 
-void send_to_slave(uint8_t slave_id, uint8_t data_byte) {
+void send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp) {
     if (slave_id >= ARRAY_SIZE(cs_gpios)) return;
 
-    /* 1. Initialize the config struct to zero */
-    struct spi_config cfg = {0};
-    
-    /* 2. Set the SPI parameters */
-    cfg.frequency = 1000000;
-    cfg.operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB;
-    cfg.slave = 0;
+    uint8_t tx_data[8];
+    for (int i = 0; i < 8; i++) {
+        tx_data[i] = (uint8_t)(timestamp >> (56 - (i * 8)));
+    }
 
-    /* 3. Assign the CS struct DIRECTLY (no ampersand &) */
-    /* In your version of Zephyr, cfg.cs is a struct, not a pointer. */
-    cfg.cs.gpio = cs_gpios[slave_id];
-    cfg.cs.delay = 0;
-
-    uint8_t tx_data[] = { data_byte };
     struct spi_buf tx_buf = { .buf = tx_data, .len = sizeof(tx_data) };
     struct spi_buf_set tx_bufs = { .buffers = &tx_buf, .count = 1 };
 
+    /* 1. Fully initialize the CS control struct from the GPIO spec */
+    struct spi_cs_control cs_ctrl = {
+        .gpio = cs_gpios[slave_id],
+        .delay = 0,
+    };
+
+    /* 2. Configure SPI with the pointer to the CS control */
+    struct spi_config cfg = {
+        .frequency = 1000000,
+        .operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+        .slave = 0,
+        .cs = cs_ctrl, // Pass the struct
+    };
+
+    /* This call now handles the CS pin automatically for all 8 bytes */
     int err = spi_write(spi_dev, &cfg, &tx_bufs);
+    
     if (err) {
-        printk("SPI error: %d\n", err);
+        printk("SPI Error: %d\n", err);
     }
 }
 
@@ -62,11 +69,16 @@ int main(void) {
     printk("Multi-slave SPI system online\n");
 
     while (1) {
+        
+
         for (uint8_t i = 0; i < 4; i++) {
-            printk("Talking to Slave %d...\n", i);
-            send_to_slave(i, 0xAB + i);
-            k_msleep(1000);
+			int64_t now = k_uptime_get();
+            printk("Slave %d: Sending timestamp %lld ms\n", i, now);
+            send_timestamp_to_slave(i, now);
+            k_msleep(100); // Small gap between slaves
         }
+
+        k_msleep(1000); // Send once per second
     }
     return 0;
 }
