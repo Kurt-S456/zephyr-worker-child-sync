@@ -1,16 +1,10 @@
-&gpiob {
+&spi1 {
     status = "okay";
-};
-
-/ {
-    aliases {
-        cs1 = &cs1_pin_node;
-    };
-    cs_signals {
-        compatible = "gpio-keys";
-        cs1_pin_node: cs1_pin_node {
-            gpios = <&gpiob 0 GPIO_ACTIVE_LOW>;
-            label = "CS1";
-        };
-    };
+    pinctrl-0 = <&spi1_sck_master_pa5 &spi1_miso_master_pa6 &spi1_mosi_master_pa7>;
+    pinctrl-names = "default";
+    
+    cs-gpios = <&gpiob 0 GPIO_ACTIVE_LOW>,   /* Slave 0 */
+               <&gpiob 1 GPIO_ACTIVE_LOW>,   /* Slave 1 */
+               <&gpiob 10 GPIO_ACTIVE_LOW>,  /* Slave 2 */
+               <&gpioa 4 GPIO_ACTIVE_LOW>;   /* Slave 3 */
 };

@@ -1,45 +1,85 @@
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/spi.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/devicetree.h>
+#include <string.h>
 
-#define CS1_NODE DT_ALIAS(cs1)
+#define SPI1_NODE DT_NODELABEL(spi1)
 
-#if !DT_NODE_HAS_STATUS(CS1_NODE, okay)
-#error "Unsupported board: cs1 devicetree alias is not defined"
-#endif
+static const struct device *spi_dev = DEVICE_DT_GET(SPI1_NODE);
 
-static const struct gpio_dt_spec cs1 = GPIO_DT_SPEC_GET(CS1_NODE, gpios);
+static const struct gpio_dt_spec cs_gpios[] = {
+    GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 0),
+    GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 1),
+    GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 2),
+    GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 3),
+};
 
-void configure_cs_pin(void)
+/* Make buffers static + aligned (safe for DMA/ISR paths) */
+static uint8_t tx_data[8] __aligned(4);
+static uint8_t rx_dummy[8] __aligned(4);
+
+static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp)
 {
-	if (!device_is_ready(cs1.port)) {
-		printk("Error: GPIO device not ready\n");
-		return;
-	}
+    if (slave_id >= ARRAY_SIZE(cs_gpios)) {
+        return -EINVAL;
+    }
 
-	int ret = gpio_pin_configure_dt(&cs1, GPIO_INPUT | GPIO_PULL_UP);
-	if (ret != 0) {
-		printk("Error %d: failed to configure CS pin\n", ret);
-		return;
-	}
+    for (int i = 0; i < 8; i++) {
+        tx_data[i] = (uint8_t)(timestamp >> (56 - (i * 8)));
+    }
+    memset(rx_dummy, 0, sizeof(rx_dummy));
+
+    struct spi_buf tx_buf = { .buf = tx_data,  .len = 8 };
+    struct spi_buf rx_buf = { .buf = rx_dummy, .len = 8 };
+    struct spi_buf_set txs = { .buffers = &tx_buf, .count = 1 };
+    struct spi_buf_set rxs = { .buffers = &rx_buf, .count = 1 };
+
+    /* Add a tiny CS setup/hold delay */
+    struct spi_cs_control cs_ctrl = {
+        .gpio  = cs_gpios[slave_id],
+        .delay = 2, /* microseconds */
+    };
+
+    struct spi_config cfg = {
+        .frequency = 1000000,
+        .operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+        .slave = 0,
+        .cs = cs_ctrl,
+    };
+
+    return spi_transceive(spi_dev, &cfg, &txs, &rxs);
 }
-
 
 int main(void)
 {
+    if (!device_is_ready(spi_dev)) {
+        printk("SPI device not ready\n");
+        return 0;
+    }
 
-	configure_cs_pin();
+    for (int i = 0; i < ARRAY_SIZE(cs_gpios); i++) {
+        if (!gpio_is_ready_dt(&cs_gpios[i])) {
+            printk("GPIO for CS %d not ready\n", i);
+            return 0;
+        }
+    }
 
-	int value = 0;
-	while (1)
-	{
-		gpio_pin_set_dt(&cs1, value);
-		printk("CS1 set to %d\n", value);
-		value = !value;
-		k_sleep(K_MSEC(1000));
-	}
-	return 0;
+    printk("SPI worker online\n");
+
+    while (1) {
+        int64_t now = k_uptime_get();
+
+        for (uint8_t i = 0; i < 4; i++) {
+            int err = send_timestamp_to_slave(i, (uint64_t)now);
+            if (err) {
+                printk("Slave %d: send failed: %d\n", i, err);
+            }
+            /* Give slaves time to re-arm (important for Zephyr SPI slave) */
+            k_msleep(5);
+        }
+
+        k_msleep(1000);
+    }
+    return 0;
 }
