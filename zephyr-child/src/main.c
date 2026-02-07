@@ -3,6 +3,12 @@
 #include <zephyr/drivers/spi.h>
 #include <string.h>
 
+#ifndef APP_CHILD_ID
+#error "APP_CHILD_ID not defined (use -DAPP_CHILD_ID=x)"
+#endif
+
+#define CHILD_ID APP_CHILD_ID
+
 #define SPI_DEV_NODE DT_NODELABEL(spi1)
 
 /* DMA/IRQ-safe static buffers (also helps on non-DMA) */
@@ -48,7 +54,8 @@ void main(void)
         return;
     }
 
-    printk("SPI1 SLAVE ready (expecting 8 bytes per CS)\n");
+   	printk("SPI CHILD %d ready\n", CHILD_ID);
+
 
     while (1) {
         memset(rx_data, 0, sizeof(rx_data));
@@ -64,8 +71,8 @@ void main(void)
 		for (int i = 0; i < 8; i++) {
 			ts = (ts << 8) | rx_data[i];
 		}
-		printk("RX (%d): %02x %02x %02x %02x %02x %02x %02x %02x  -> %llu ms\n",
-			err,
+		printk("CHILD %d RX: %02x %02x %02x %02x %02x %02x %02x %02x -> %llu ms\n",
+			CHILD_ID,
 			rx_data[0], rx_data[1], rx_data[2], rx_data[3],
 			rx_data[4], rx_data[5], rx_data[6], rx_data[7],
 			ts);
