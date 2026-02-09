@@ -91,7 +91,7 @@ int main(void)
         if (err >= 0) {
             printk("---SPI transaction complete---\n");
             /* read true local uptime once */
-            uint64_t local = k_uptime_get();
+            uint64_t local = get_synced_uptime_ms();
             printk("CHILD %d local timestamp: %" PRIu64 " ms\n", CHILD_ID, local);
             /* Some drivers return 0, some return number of frames/bytes.
             Treat any non-negative as success. */
@@ -117,16 +117,19 @@ int main(void)
             clock_offset_ms = offset;
 #endif
 
-            int64_t synced_ts = get_synced_uptime_ms();
-            printk("CHILD %d RX: %02x %02x %02x %02x %02x %02x %02x %02x -> %" PRIu64 " ms (%" PRIu64 " s)\n",
+            uint64_t synced_ms = get_synced_uptime_ms();
+            uint64_t worker_s = worker_ts / 1000;
+            uint64_t worker_ms_rem = worker_ts % 1000;
+            printk("CHILD %d RX: %02x %02x %02x %02x %02x %02x %02x %02x -> %" PRIu64 " ms (%" PRIu64 ".%03" PRIu64 " s)\n",
                 CHILD_ID,
                 rx_data[0], rx_data[1], rx_data[2], rx_data[3],
                 rx_data[4], rx_data[5], rx_data[6], rx_data[7],
-                worker_ts, worker_ts/1000);
+                worker_ts, worker_s, worker_ms_rem);
             printk("CHILD %d clock offset: %" PRId64 " ms\n", CHILD_ID, clock_offset_ms);
 
-         
-            printk("CHILD %d synced timestamp: %" PRIu64 " ms (%" PRIu64 " s)\n", CHILD_ID, synced_ts, synced_ts/1000);
+            uint64_t synced_s = synced_ms / 1000;
+            uint64_t synced_ms_rem = synced_ms % 1000;
+            printk("CHILD %d synced timestamp: %" PRIu64 " ms (%" PRIu64 ".%03" PRIu64 " s)\n", CHILD_ID, synced_ms, synced_s, synced_ms_rem);
             
 
 		} else {

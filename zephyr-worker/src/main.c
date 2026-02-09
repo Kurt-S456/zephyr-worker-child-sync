@@ -15,6 +15,18 @@ static const struct gpio_dt_spec cs_gpios[] = {
     GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 3),
 };
 
+#/***********************************************************
+# * MASTER_SYNC_INTERVAL_MS
+# *
+# * Can be overridden at build time. Example (PlatformIO):
+# *   add to the env in platformio.ini:
+# *     build_flags = -DMASTER_SYNC_INTERVAL_MS=30000
+# * Or pass a compiler flag directly: -DMASTER_SYNC_INTERVAL_MS=60000
+# */
+#ifndef MASTER_SYNC_INTERVAL_MS
+#define MASTER_SYNC_INTERVAL_MS 60000 /* 60 seconds */
+#endif
+
 /* Make buffers static + aligned (safe for DMA/ISR paths) */
 static uint8_t tx_data[8] __aligned(4);
 static uint8_t rx_dummy[8] __aligned(4);
@@ -79,7 +91,7 @@ int main(void)
             k_msleep(1000);
         }
 
-        k_msleep(2000);
+        k_msleep(MASTER_SYNC_INTERVAL_MS);
     }
     return 0;
 }
