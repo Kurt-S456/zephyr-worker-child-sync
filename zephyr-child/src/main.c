@@ -56,9 +56,15 @@ static const struct spi_config slave_cfg = {
 #endif
 
 #ifndef MAX_ACCEPTABLE_OFFSET_MS
-#define MAX_ACCEPTABLE_OFFSET_MS 10000 /* 10 seconds */
+#define MAX_ACCEPTABLE_OFFSET_MS 60000 /* 60 seconds */
 #endif
 
+/* -Define MAX_SYNC_COUNT to control the number of synchronization attempts before exiting. 
+Example: add -DMAX_SYNC_COUNT=500
+ */
+#ifndef MAX_SYNC_COUNT
+#define MAX_SYNC_COUNT 1000
+#endif
 
 /* Signed offset (ms) to add to local `k_uptime_get()` to align with master time. */
 static int64_t clock_offset_ms = 0;
@@ -80,8 +86,8 @@ int main(void)
 
     int64_t offset = 0;  /* ms (signed diff) */
 
-
-    while (1) {
+    int sync_count = 0;
+    while (sync_count < MAX_SYNC_COUNT) {
         memset(rx_data, 0, sizeof(rx_data));
         memset(tx_dummy, 0, sizeof(tx_dummy));
 
@@ -89,10 +95,17 @@ int main(void)
         int err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
 
         if (err >= 0) {
-            printk("---SPI transaction complete---\n");
+            printk("---SPI transaction %d complete on CHILD %d---\n", sync_count, CHILD_ID);
             /* read true local uptime once */
-            uint64_t local = get_synced_uptime_ms();
-            printk("CHILD %d local timestamp: %" PRIu64 " ms\n", CHILD_ID, local);
+            uint64_t local = 0;
+            if (sync_count == 0) {
+                local = k_uptime_get();
+                printk("CHILD %d initial local timestamp: %" PRIu64 " ms\n", CHILD_ID, local);
+            } else {
+                local = get_synced_uptime_ms();
+                printk("CHILD %d local timestamp before sync: %" PRIu64 " ms\n", CHILD_ID, local);
+            }
+            sync_count++;
             /* Some drivers return 0, some return number of frames/bytes.
             Treat any non-negative as success. */
             uint64_t worker_ts = 0;
@@ -138,5 +151,7 @@ int main(void)
 		}
 
     }
+    printk("CHILD %d max sync count reached, exiting main loop\n", CHILD_ID);
+
     return 0;
 }
