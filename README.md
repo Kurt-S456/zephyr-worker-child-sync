@@ -52,21 +52,5 @@ Notes and flags
   probe/iterate. Defaults to the number of CS GPIOs in the board DTS.
 
 Runtime behaviour
-- On startup the worker probes each CS line with a dummy transceive and
-  marks which CS lines have a responding slave. The worker skips absent
-  CS lines and re-probes them periodically.
-- Handshake (master-first):
-  1) Worker asserts CSx and sends initial timestamp to child.
-  2) Worker clocks a read and receives the child's timestamp (child logs
-     local arrival of initial timestamp).
-  3) Worker sends a final timestamp to child.
-  4) Child adjusts a local logical offset and sends an ACK.
 
 Debugging
-- Worker prints `MASTER phase1/phase3` lines with outgoing bytes.
-- Child prints `phase2/phase3/phase4` lines showing sent/received bytes and
-  transceive return codes. Use those logs to verify wiring and timing.
-
-If you want, I can also add a small diagram of pin names for a specific
-board — tell me which master board you're using and I'll add explicit
-pin mappings.

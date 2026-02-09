@@ -12,9 +12,11 @@
 #define SPI_DEV_NODE DT_NODELABEL(spi1)
 
 /* DMA/IRQ-safe static buffers (also helps on non-DMA) */
-static uint8_t rx_data[8] __aligned(4);
 static uint8_t tx_data[8] __aligned(4);
-static uint8_t tx_dummy[8] __aligned(4);
+static uint8_t rx_data[8] __aligned(4);
+/* default presence pattern: non-zero so master probe sees a response */
+static uint8_t tx_dummy[8] __aligned(4) = { 0x5A, 0x5A, 0x5A, 0x5A,
+                                            0x5A, 0x5A, 0x5A, 0x5A };
 
 static struct spi_buf rx_buf = {
     .buf = rx_data,
@@ -36,17 +38,23 @@ static struct spi_buf_set tx_set = {
     .count = 1,
 };
 
-/* IMPORTANT:
- * - STM32 driver validates frequency even in slave mode -> must be non-zero.
- * - Mode defaults to CPOL=0/CPHA=0 (Mode 0). Add SPI_MODE_CPOL / SPI_MODE_CPHA if your master differs.
- */
 static const struct spi_config slave_cfg = {
     .frequency = 1000000,
     .operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
     .slave = 0,
 };
+/* We'll run the slave logic in a dedicated thread so the child is always
+ * immediately ready to respond to master probe transceives. This increases
+ * the chance the master probe occurs while the slave is in `spi_transceive`.
+ */
 
-void main(void)
+#include <zephyr/sys/printk.h>
+#include <zephyr/kernel.h>
+
+K_THREAD_STACK_DEFINE(slave_stack, 1024);
+static struct k_thread slave_thread_data;
+
+static void slave_thread(void *arg1, void *arg2, void *arg3)
 {
     const struct device *spi_dev = DEVICE_DT_GET(SPI_DEV_NODE);
 
@@ -55,23 +63,17 @@ void main(void)
         return;
     }
 
-   	printk("SPI CHILD %d ready\n", CHILD_ID);
-
+    printk("SPI CHILD %d ready\n", CHILD_ID);
 
     /* local offset to allow logical clock adjustments (ms) */
     int64_t local_offset_ms = 0;
 
     while (1) {
-        /* Sequence expected from master:
-         * 1) Master sends initial timestamp (we must be ready to receive)
-         * 2) We send our child timestamp (master will read it)
-         * 3) Master sends final timestamp (we receive and adjust)
-         * 4) We send ACK
+        /* Phase 1: receive initial master timestamp (or probe)
+         * We always use `tx_dummy` here so the master probe (all-zero TX)
+         * will see non-zero data on MISO.
          */
-
-        /* Phase 1: receive initial master timestamp */
         memset(rx_data, 0, sizeof(rx_data));
-        memset(tx_dummy, 0, sizeof(tx_dummy));
 
         struct spi_buf tx_buf1 = { .buf = tx_dummy, .len = 8 };
         struct spi_buf rx_buf1 = { .buf = rx_data,  .len = 8 };
@@ -80,10 +82,11 @@ void main(void)
 
         int err = spi_transceive(spi_dev, &slave_cfg, &txs1, &rxs1);
         if (err < 0) {
-            printk("SPI RX initial master TS error: %d\n", err);
             k_msleep(10);
             continue;
         }
+
+        /* always handle the received frame (probing removed) */
 
         int64_t arrival_initial = k_uptime_get() + local_offset_ms;
         uint64_t master_ts1 = 0;
@@ -100,45 +103,42 @@ void main(void)
         }
         memset(rx_data, 0, sizeof(rx_data));
 
-         /* use global buffers (stable memory) for slave TX/RX */
-         tx_buf.buf = tx_data;
-         tx_buf.len = 8;
-         rx_buf.buf = rx_data;
-         rx_buf.len = 8;
+        /* use global buffers (stable memory) for slave TX/RX */
+        tx_buf.buf = tx_data;
+        tx_buf.len = 8;
+        rx_buf.buf = rx_data;
+        rx_buf.len = 8;
 
-         printk("CHILD %d phase2 send TS=%llu bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-             CHILD_ID, child_ts,
-             tx_data[0], tx_data[1], tx_data[2], tx_data[3],
-             tx_data[4], tx_data[5], tx_data[6], tx_data[7]);
+        printk("CHILD %d phase2 send TS=%llu bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            CHILD_ID, child_ts,
+            tx_data[0], tx_data[1], tx_data[2], tx_data[3],
+            tx_data[4], tx_data[5], tx_data[6], tx_data[7]);
 
-         err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
-         printk("CHILD %d phase2 transceive ret=%d\n", CHILD_ID, err);
+        err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
         if (err < 0) {
-            printk("SPI send child TS error: %d\n", err);
             k_msleep(10);
             continue;
         }
 
         /* Phase 3: receive final master timestamp (sync message) */
         memset(rx_data, 0, sizeof(rx_data));
-        memset(tx_dummy, 0, sizeof(tx_dummy));
 
-         /* prepare global buffers for RX of final master timestamp */
-         tx_buf.buf = tx_dummy;
-         tx_buf.len = 8;
-         rx_buf.buf = rx_data;
-         rx_buf.len = 8;
+        /* prepare global buffers for RX of final master timestamp */
+        tx_buf.buf = tx_dummy;
+        tx_buf.len = 8;
+        rx_buf.buf = rx_data;
+        rx_buf.len = 8;
 
-         err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
-         printk("CHILD %d phase3 transceive ret=%d rx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-             CHILD_ID, err,
-             rx_data[0], rx_data[1], rx_data[2], rx_data[3],
-             rx_data[4], rx_data[5], rx_data[6], rx_data[7]);
+        err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
         if (err < 0) {
-            printk("SPI RX final master TS error: %d\n", err);
             k_msleep(10);
             continue;
         }
+
+        printk("CHILD %d phase3 transceive ret=%d rx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            CHILD_ID, err,
+            rx_data[0], rx_data[1], rx_data[2], rx_data[3],
+            rx_data[4], rx_data[5], rx_data[6], rx_data[7]);
 
         int64_t arrival_final = k_uptime_get() + local_offset_ms;
         uint64_t master_ts2 = 0;
@@ -157,20 +157,18 @@ void main(void)
         tx_data[0] = 0xAC; /* ACK */
         memset(rx_data, 0, sizeof(rx_data));
 
-         tx_buf.buf = tx_data;
-         tx_buf.len = 8;
-         rx_buf.buf = rx_data;
-         rx_buf.len = 8;
+        tx_buf.buf = tx_data;
+        tx_buf.len = 8;
+        rx_buf.buf = rx_data;
+        rx_buf.len = 8;
 
-         printk("CHILD %d phase4 send ACK bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-             CHILD_ID,
-             tx_data[0], tx_data[1], tx_data[2], tx_data[3],
-             tx_data[4], tx_data[5], tx_data[6], tx_data[7]);
+        printk("CHILD %d phase4 send ACK bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            CHILD_ID,
+            tx_data[0], tx_data[1], tx_data[2], tx_data[3],
+            tx_data[4], tx_data[5], tx_data[6], tx_data[7]);
 
-         err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
-         printk("CHILD %d phase4 transceive ret=%d\n", CHILD_ID, err);
+        err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
         if (err < 0) {
-            printk("SPI ACK send error: %d\n", err);
             k_msleep(10);
             continue;
         }
@@ -178,4 +176,14 @@ void main(void)
         /* Small pause before next sync round */
         k_msleep(1);
     }
+}
+
+int main(void)
+{
+    k_thread_create(&slave_thread_data, slave_stack, K_THREAD_STACK_SIZEOF(slave_stack),
+                    slave_thread, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+
+    /* main returns; thread runs the slave loop */
+    return 0;
 }

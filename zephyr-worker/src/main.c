@@ -154,44 +154,6 @@ static int send_timestamp_to_slave(uint8_t slave_id, uint64_t ts)
 /* Probe whether a slave is present on a given CS by issuing a dummy
  * transceive and checking whether MISO returns any non-zero data.
  */
-static bool probe_slave(uint8_t slave_id)
-{
-    if (slave_id >= ARRAY_SIZE(cs_gpios)) {
-        return false;
-    }
-
-    struct spi_cs_control cs_ctrl = {
-        .gpio  = cs_gpios[slave_id],
-        .delay = 2,
-    };
-
-    struct spi_config cfg = {
-        .frequency = 1000000,
-        .operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
-        .slave = 0,
-        .cs = cs_ctrl,
-    };
-
-    uint8_t probe_tx[8] __aligned(4) = {0};
-    uint8_t probe_rx[8] __aligned(4) = {0};
-
-    struct spi_buf txb = { .buf = probe_tx, .len = 8 };
-    struct spi_buf rxb = { .buf = probe_rx, .len = 8 };
-    struct spi_buf_set txs = { .buffers = &txb, .count = 1 };
-    struct spi_buf_set rxs = { .buffers = &rxb, .count = 1 };
-
-    int ret = spi_transceive(spi_dev, &cfg, &txs, &rxs);
-    if (ret < 0) {
-        return false;
-    }
-
-    for (int i = 0; i < 8; i++) {
-        if (probe_rx[i] != 0) {
-            return true;
-        }
-    }
-    return false;
-}
 
 int main(void)
 {
@@ -209,46 +171,33 @@ int main(void)
 
     printk("SPI worker online\n");
 
-            /* Probe which CS lines have attached slaves (and re-probe periodically). */
-            static bool slave_present[ARRAY_SIZE(cs_gpios)];
-            for (uint8_t i = 0; i < WORKER_SLAVE_COUNT; i++) {
-                slave_present[i] = probe_slave(i);
-                printk("CS %d present=%d\n", i, (int)slave_present[i]);
+    /* Assume configured CS lines have slaves attached (probing removed). */
+    static bool slave_present[ARRAY_SIZE(cs_gpios)];
+    for (uint8_t i = 0; i < WORKER_SLAVE_COUNT; i++) {
+        slave_present[i] = true;
+        printk("CS %d present=%d (assumed)\n", i, (int)slave_present[i]);
+    }
+
+    uint32_t loop_count = 0;
+    while (1) {
+        int64_t now = k_uptime_get();
+
+        for (uint8_t i = 0; i < WORKER_SLAVE_COUNT; i++) {
+            if (!slave_present[i]) {
+                continue;
             }
-
-            printk("SPI worker online\n");
-
-            uint32_t loop_count = 0;
-            while (1) {
-                int64_t now = k_uptime_get();
-
-                for (uint8_t i = 0; i < WORKER_SLAVE_COUNT; i++) {
-                    if (!slave_present[i]) {
-                        continue;
-                    }
-                    int err = send_timestamp_to_slave(i, (uint64_t)now);
-                    if (err) {
-                        printk("Slave %d: send failed: %d\n", i, err);
-                    }
-                    /* Give slaves time to re-arm (important for Zephyr SPI slave) */
-                    k_msleep(5);
-                }
-
-                /* Re-probe absent CS lines every 60 loops (~60 seconds by default) */
-                loop_count++;
-                if ((loop_count % 60) == 0) {
-                    for (uint8_t i = 0; i < WORKER_SLAVE_COUNT; i++) {
-                        if (!slave_present[i]) {
-                            slave_present[i] = probe_slave(i);
-                            if (slave_present[i]) {
-                                printk("Detected slave on CS %d\n", i);
-                            }
-                        }
-                    }
-                }
-
-                k_msleep(1000);
+            int err = send_timestamp_to_slave(i, (uint64_t)now);
+            if (err) {
+                printk("Slave %d: send failed: %d\n", i, err);
             }
+            /* Give slaves time to re-arm (important for Zephyr SPI slave) */
+            k_msleep(5);
+        }
+
+        /* probing removed: keep assuming slaves present */
+        loop_count++;
+
+        k_msleep(1000);
     }
     return 0;
-}
+}    
