@@ -76,10 +76,10 @@ int main(void)
                 printk("Slave %d: send failed: %d\n", i, err);
             }
             /* Give slaves time to re-arm (important for Zephyr SPI slave) */
-            k_msleep(5);
+            k_msleep(1000);
         }
 
-        k_msleep(1000);
+        k_msleep(2000);
     }
     return 0;
 }
