@@ -27,7 +27,6 @@ static const struct gpio_dt_spec cs_gpios[] = {
 #define MASTER_SYNC_INTERVAL_MS 60000 /* 60 seconds */
 #endif
 
-/* Make buffers static + aligned (safe for DMA/ISR paths) */
 static uint8_t tx_data[8] __aligned(4);
 static uint8_t rx_dummy[8] __aligned(4);
 
@@ -47,7 +46,6 @@ static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp)
     struct spi_buf_set txs = { .buffers = &tx_buf, .count = 1 };
     struct spi_buf_set rxs = { .buffers = &rx_buf, .count = 1 };
 
-    /* Add a tiny CS setup/hold delay */
     struct spi_cs_control cs_ctrl = {
         .gpio  = cs_gpios[slave_id],
         .delay = 2, /* microseconds */
@@ -88,7 +86,7 @@ int main(void)
                 printk("Slave %d: send failed: %d\n", i, err);
             }
             /* Give slaves time to re-arm (important for Zephyr SPI slave) */
-            k_msleep(1000);
+            k_msleep(100);
         }
 
         k_msleep(MASTER_SYNC_INTERVAL_MS);
