@@ -1,0 +1,14 @@
+/ {
+    aliases {
+        sw0 = &sync_trigger;
+    };
+
+    leds {
+        compatible = "gpio-leds";
+
+        sync_trigger: sync_trigger_node {
+            gpios = <&gpioa 0 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+            label = "Hardware Sync Trigger";
+        }; 
+    }; 
+};

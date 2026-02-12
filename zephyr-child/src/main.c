@@ -1,37 +1,20 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/gpio.h>
 #include <string.h>
 #include <inttypes.h>
-
-#ifndef APP_CHILD_ID
-#error "APP_CHILD_ID not defined"
-#endif
+#include <stdlib.h>
 
 #define CHILD_ID APP_CHILD_ID
 #define SPI_DEV_NODE DT_NODELABEL(spi1)
+#define SYNC_PIN_NODE DT_ALIAS(sw0) 
 
-static uint8_t rx_data[8] __aligned(4);
-static uint8_t tx_dummy[8] __aligned(4);
+static const struct gpio_dt_spec sync_pin = GPIO_DT_SPEC_GET(SYNC_PIN_NODE, gpios);
+static struct gpio_callback sync_cb_data;
+static struct k_sem sync_sem;
 
-static struct spi_buf rx_buf = { .buf = rx_data, .len = sizeof(rx_data) };
-static struct spi_buf tx_buf = { .buf = tx_dummy, .len = sizeof(tx_dummy) };
-static struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
-static struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
-
-static const struct spi_config slave_cfg = {
-    .frequency = 1000000,
-    .operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
-    .slave = 0,
-};
-
-/* --- MIKROSEKUNDEN LOGIK --- */
-
-// Maximale Abweichung für Validierung: 10 Sekunden in Mikrosekunden
-#ifndef MAX_ACCEPTABLE_OFFSET_US
-#define MAX_ACCEPTABLE_OFFSET_US 10000000ULL
-#endif
-
+static volatile uint64_t latched_local_us = 0;
 static int64_t clock_offset_us = 0;
 
 static inline uint64_t get_uptime_us(void) {
@@ -42,53 +25,59 @@ static inline uint64_t get_synced_uptime_us(void) {
     return (uint64_t)((int64_t)get_uptime_us() + clock_offset_us);
 }
 
-int main(void)
-{
-    const struct device *spi_dev = DEVICE_DT_GET(SPI_DEV_NODE);
-    if (!device_is_ready(spi_dev)) return -1;
+void sync_callback(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
+    latched_local_us = get_uptime_us();
+    k_sem_give(&sync_sem);
+}
 
-    printk("SPI CHILD %d ready (Precision: Microseconds)\n", CHILD_ID);
+static uint8_t rx_data[8] __aligned(4);
+static uint8_t tx_dummy[8] __aligned(4);
+static struct spi_buf rx_buf = { .buf = rx_data, .len = 8 };
+static struct spi_buf tx_buf = { .buf = tx_dummy, .len = 8 };
+static struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
+static struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
+
+static const struct spi_config slave_cfg = {
+    .frequency = 1000000,
+    .operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
+};
+
+int main(void) {
+    const struct device *spi_dev = DEVICE_DT_GET(SPI_DEV_NODE);
+    
+    k_sem_init(&sync_sem, 0, 1);
+    gpio_pin_configure_dt(&sync_pin, GPIO_INPUT);
+    gpio_pin_interrupt_configure_dt(&sync_pin, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_init_callback(&sync_cb_data, sync_callback, BIT(sync_pin.pin));
+    gpio_add_callback(sync_pin.port, &sync_cb_data);
 
     int sync_count = 0;
     while (sync_count < 1000) {
-        memset(rx_data, 0, 8);
+        printk("CHILD %d waiting for sync #%d...\n", CHILD_ID, sync_count + 1);
+        k_sem_take(&sync_sem, K_FOREVER);
         
-        // Blockiert bis Master sendet
-        int err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
-
-        if (err >= 0) {
-            uint64_t local_now_us = (sync_count == 0) ? get_uptime_us() : get_synced_uptime_us();
-            
-            // Master Timestamp aus SPI-Bytes extrahieren (us)
+        if (spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set) >= 0) {
             uint64_t master_ts_us = 0;
-            for (int i = 0; i < 8; i++) {
-                master_ts_us = (master_ts_us << 8) | rx_data[i];
-            }
+            for (int i = 0; i < 8; i++) master_ts_us = (master_ts_us << 8) | rx_data[i];
+
+            uint64_t local_ref_us = (sync_count == 0) ? 
+                                    latched_local_us : 
+                                    (uint64_t)((int64_t)latched_local_us + clock_offset_us);
             
-            int64_t diff_us = (int64_t)master_ts_us - (int64_t)local_now_us;
-
-            // Validierung
-            uint64_t abs_diff = (diff_us < 0) ? (uint64_t)(-diff_us) : (uint64_t)diff_us;
-            if (abs_diff < MAX_ACCEPTABLE_OFFSET_US || sync_count == 0) {
-                clock_offset_us += diff_us; // Kumulativer Offset
-            }
-
+            int64_t diff_us = (int64_t)master_ts_us - (int64_t)local_ref_us;
+            clock_offset_us += diff_us;
             sync_count++;
 
             double offset_ms = (double)diff_us / 1000.0;
             int32_t ms_int = (int32_t)offset_ms;
-            uint32_t ms_frac = (uint32_t)((offset_ms - ms_int) * 1000000.0);
-            if (offset_ms < 0 && ms_int == 0) {
-                printk("CHILD %d clock offset: -%d.%06u ms\n", CHILD_ID, ms_int, ms_frac);
-            } else {
-                printk("CHILD %d clock offset: %d.%06u ms\n", CHILD_ID, ms_int, ms_frac);
-            }
+            uint32_t ms_frac = (uint32_t)(llabs((int64_t)((offset_ms - ms_int) * 1000000.0)));
+            double synced_uptime_ms = (double)get_synced_uptime_us() / 1000.0;
+            uint32_t synced_ms_int = (uint32_t)synced_uptime_ms;
+            uint32_t synced_ms_frac = (uint32_t)((synced_uptime_ms - synced_ms_int) * 1000000.0);
 
-            uint64_t final_us = get_synced_uptime_us();
-            printk("CHILD %d Synced Time: %" PRIu64 " us\n", CHILD_ID, final_us);
-
-        } else {
-            k_msleep(10);
+            printk("CHILD %d clock offset: %s%d.%06u ms\n", 
+                   CHILD_ID, (offset_ms < 0 && ms_int == 0) ? "-" : "", ms_int, ms_frac);
+            printk("CHILD %d synced uptime: %u.%06u ms\n", CHILD_ID, synced_ms_int, synced_ms_frac);
         }
     }
     return 0;

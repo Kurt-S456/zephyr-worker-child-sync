@@ -1,3 +1,18 @@
+/ {
+    aliases {
+        sync-out = &sync_trigger;
+    };
+
+    /* Use a dedicated node for the sync signal */
+    sync_signals {
+        compatible = "gpio-leds";
+        sync_trigger: sync_trigger_0 {
+            /* Adjust PA0 to your preferred physical pin */
+            gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;
+            label = "Hardware Sync Pulse";
+        };
+    };
+};
 &spi1 {
     status = "okay";
     pinctrl-0 = <&spi1_sck_master_pa5 &spi1_miso_master_pa6 &spi1_mosi_master_pa7>;
