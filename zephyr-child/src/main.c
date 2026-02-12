@@ -5,153 +5,91 @@
 #include <inttypes.h>
 
 #ifndef APP_CHILD_ID
-#error "APP_CHILD_ID not defined (use -DAPP_CHILD_ID=x)"
+#error "APP_CHILD_ID not defined"
 #endif
 
 #define CHILD_ID APP_CHILD_ID
-
 #define SPI_DEV_NODE DT_NODELABEL(spi1)
 
-/* DMA/IRQ-safe static buffers (also helps on non-DMA) */
 static uint8_t rx_data[8] __aligned(4);
 static uint8_t tx_dummy[8] __aligned(4);
 
-static struct spi_buf rx_buf = {
-    .buf = rx_data,
-    .len = sizeof(rx_data),
-};
+static struct spi_buf rx_buf = { .buf = rx_data, .len = sizeof(rx_data) };
+static struct spi_buf tx_buf = { .buf = tx_dummy, .len = sizeof(tx_dummy) };
+static struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
+static struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
 
-static struct spi_buf tx_buf = {
-    .buf = tx_dummy,
-    .len = sizeof(tx_dummy),
-};
-
-static struct spi_buf_set rx_set = {
-    .buffers = &rx_buf,
-    .count = 1,
-};
-
-static struct spi_buf_set tx_set = {
-    .buffers = &tx_buf,
-    .count = 1,
-};
-
-/* IMPORTANT:
- * - STM32 driver validates frequency even in slave mode -> must be non-zero.
- * - Mode defaults to CPOL=0/CPHA=0 (Mode 0). Add SPI_MODE_CPOL / SPI_MODE_CPHA if your master differs.
- */
 static const struct spi_config slave_cfg = {
     .frequency = 1000000,
     .operation = SPI_OP_MODE_SLAVE | SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
     .slave = 0,
 };
 
-/* Build-time controls:
- * - Define ENABLE_OFFSET_VALIDATION=0 to disable rejecting large jumps.
- * - Define MAX_ACCEPTABLE_OFFSET_MS to override the default threshold (10s).
- * Example: add -DENABLE_OFFSET_VALIDATION=1 -DMAX_ACCEPTABLE_OFFSET_MS=5000
- */
-#ifndef ENABLE_OFFSET_VALIDATION
-#define ENABLE_OFFSET_VALIDATION 1
+/* --- MIKROSEKUNDEN LOGIK --- */
+
+// Maximale Abweichung für Validierung: 10 Sekunden in Mikrosekunden
+#ifndef MAX_ACCEPTABLE_OFFSET_US
+#define MAX_ACCEPTABLE_OFFSET_US 10000000ULL
 #endif
 
-#ifndef MAX_ACCEPTABLE_OFFSET_MS
-#define MAX_ACCEPTABLE_OFFSET_MS 60000 /* 60 seconds */
-#endif
+static int64_t clock_offset_us = 0;
 
-/* -Define MAX_SYNC_COUNT to control the number of synchronization attempts before exiting. 
-Example: add -DMAX_SYNC_COUNT=500
- */
-#ifndef MAX_SYNC_COUNT
-#define MAX_SYNC_COUNT 1000
-#endif
+static inline uint64_t get_uptime_us(void) {
+    return (k_cycle_get_64() * 1000000ULL) / sys_clock_hw_cycles_per_sec();
+}
 
-/* Signed offset (ms) to add to local `k_uptime_get()` to align with master time. */
-static int64_t clock_offset_ms = 0;
-
-static inline uint64_t get_synced_uptime_ms(void)
-{
-    return (uint64_t)((int64_t)k_uptime_get() + clock_offset_ms);
+static inline uint64_t get_synced_uptime_us(void) {
+    return (uint64_t)((int64_t)get_uptime_us() + clock_offset_us);
 }
 
 int main(void)
 {
     const struct device *spi_dev = DEVICE_DT_GET(SPI_DEV_NODE);
-    if (!device_is_ready(spi_dev)) {
-        printk("SPI1 device not ready\n");
-        return -1;
-    }
+    if (!device_is_ready(spi_dev)) return -1;
 
-   	printk("SPI CHILD %d ready\n", CHILD_ID);
-
-    int64_t offset = 0;  /* ms (signed diff) */
+    printk("SPI CHILD %d ready (Precision: Microseconds)\n", CHILD_ID);
 
     int sync_count = 0;
-    while (sync_count < MAX_SYNC_COUNT) {
-        memset(rx_data, 0, sizeof(rx_data));
-        memset(tx_dummy, 0, sizeof(tx_dummy));
-
-        /* Blocks until the master clocks a transaction (and NSS frames it) */
+    while (sync_count < 1000) {
+        memset(rx_data, 0, 8);
+        
+        // Blockiert bis Master sendet
         int err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
 
         if (err >= 0) {
-            printk("---SPI transaction %d complete on CHILD %d---\n", sync_count, CHILD_ID);
-            /* read true local uptime once */
-            uint64_t local = 0;
-            if (sync_count == 0) {
-                local = k_uptime_get();
-                printk("CHILD %d initial local timestamp: %" PRIu64 " ms\n", CHILD_ID, local);
-            } else {
-                local = get_synced_uptime_ms();
-                printk("CHILD %d local timestamp before sync: %" PRIu64 " ms\n", CHILD_ID, local);
-            }
-            sync_count++;
-            /* Some drivers return 0, some return number of frames/bytes.
-            Treat any non-negative as success. */
-            uint64_t worker_ts = 0;
+            uint64_t local_now_us = (sync_count == 0) ? get_uptime_us() : get_synced_uptime_us();
+            
+            // Master Timestamp aus SPI-Bytes extrahieren (us)
+            uint64_t master_ts_us = 0;
             for (int i = 0; i < 8; i++) {
-                worker_ts = (worker_ts << 8) | rx_data[i];
+                master_ts_us = (master_ts_us << 8) | rx_data[i];
             }
             
-            /* compute signed offset (master_ts - local_ts) */
-            offset = (int64_t)worker_ts - (int64_t)local;
+            int64_t diff_us = (int64_t)master_ts_us - (int64_t)local_now_us;
 
-            /* validate jump size before applying (can be disabled at build time) */
-#if ENABLE_OFFSET_VALIDATION
-            {
-                uint64_t abs_offset = (offset < 0) ? (uint64_t)(-offset) : (uint64_t)offset;
-                if (abs_offset > (uint64_t)MAX_ACCEPTABLE_OFFSET_MS) {
-                    printk("CHILD %d clock offset jump too large: %" PRId64 " ms (rejecting)\n", CHILD_ID, offset);
-                } else {
-                    clock_offset_ms = offset;
-                }
+            // Validierung
+            uint64_t abs_diff = (diff_us < 0) ? (uint64_t)(-diff_us) : (uint64_t)diff_us;
+            if (abs_diff < MAX_ACCEPTABLE_OFFSET_US || sync_count == 0) {
+                clock_offset_us += diff_us; // Kumulativer Offset
             }
-#else
-            clock_offset_ms = offset;
-#endif
 
-            uint64_t synced_ms = get_synced_uptime_ms();
-            uint64_t worker_s = worker_ts / 1000;
-            uint64_t worker_ms_rem = worker_ts % 1000;
-            printk("CHILD %d RX: %02x %02x %02x %02x %02x %02x %02x %02x -> %" PRIu64 " ms (%" PRIu64 ".%03" PRIu64 " s)\n",
-                CHILD_ID,
-                rx_data[0], rx_data[1], rx_data[2], rx_data[3],
-                rx_data[4], rx_data[5], rx_data[6], rx_data[7],
-                worker_ts, worker_s, worker_ms_rem);
-            printk("CHILD %d clock offset: %" PRId64 " ms\n", CHILD_ID, clock_offset_ms);
+            sync_count++;
 
-            uint64_t synced_s = synced_ms / 1000;
-            uint64_t synced_ms_rem = synced_ms % 1000;
-            printk("CHILD %d synced timestamp: %" PRIu64 " ms (%" PRIu64 ".%03" PRIu64 " s)\n", CHILD_ID, synced_ms, synced_s, synced_ms_rem);
-            
+            double offset_ms = (double)diff_us / 1000.0;
+            int32_t ms_int = (int32_t)offset_ms;
+            uint32_t ms_frac = (uint32_t)((offset_ms - ms_int) * 1000000.0);
+            if (offset_ms < 0 && ms_int == 0) {
+                printk("CHILD %d clock offset: -%d.%06u ms\n", CHILD_ID, ms_int, ms_frac);
+            } else {
+                printk("CHILD %d clock offset: %d.%06u ms\n", CHILD_ID, ms_int, ms_frac);
+            }
 
-		} else {
-			printk("SPI error: %d\n", err);  /* negative errno */
-			k_msleep(10);
-		}
+            uint64_t final_us = get_synced_uptime_us();
+            printk("CHILD %d Synced Time: %" PRIu64 " us\n", CHILD_ID, final_us);
 
+        } else {
+            k_msleep(10);
+        }
     }
-    printk("CHILD %d max sync count reached, exiting main loop\n", CHILD_ID);
-
     return 0;
 }

@@ -3,6 +3,7 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <string.h>
+#include <inttypes.h>
 
 #define SPI1_NODE DT_NODELABEL(spi1)
 
@@ -15,29 +16,29 @@ static const struct gpio_dt_spec cs_gpios[] = {
     GPIO_DT_SPEC_GET_BY_IDX(SPI1_NODE, cs_gpios, 3),
 };
 
-#/***********************************************************
-# * MASTER_SYNC_INTERVAL_MS
-# *
-# * Can be overridden at build time. Example (PlatformIO):
-# *   add to the env in platformio.ini:
-# *     build_flags = -DMASTER_SYNC_INTERVAL_MS=30000
-# * Or pass a compiler flag directly: -DMASTER_SYNC_INTERVAL_MS=60000
-# */
 #ifndef MASTER_SYNC_INTERVAL_MS
-#define MASTER_SYNC_INTERVAL_MS 60000 /* 60 seconds */
+#define MASTER_SYNC_INTERVAL_MS 60000 
 #endif
+
+/* * PRÄZISIONS-FUNKTION:
+ * Nutzt die Hardware-Zyklen des STM32 (72MHz) für Mikrosekunden-Auflösung.
+ */
+static inline uint64_t get_uptime_us(void) {
+    return (k_cycle_get_64() * 1000000ULL) / sys_clock_hw_cycles_per_sec();
+}
 
 static uint8_t tx_data[8] __aligned(4);
 static uint8_t rx_dummy[8] __aligned(4);
 
-static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp)
+static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp_us)
 {
     if (slave_id >= ARRAY_SIZE(cs_gpios)) {
         return -EINVAL;
     }
 
+    // Timestamp (64-bit) in das TX-Array packen
     for (int i = 0; i < 8; i++) {
-        tx_data[i] = (uint8_t)(timestamp >> (56 - (i * 8)));
+        tx_data[i] = (uint8_t)(timestamp_us >> (56 - (i * 8)));
     }
     memset(rx_dummy, 0, sizeof(rx_dummy));
 
@@ -48,7 +49,7 @@ static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp)
 
     struct spi_cs_control cs_ctrl = {
         .gpio  = cs_gpios[slave_id],
-        .delay = 2, /* microseconds */
+        .delay = 2, 
     };
 
     struct spi_config cfg = {
@@ -75,18 +76,21 @@ int main(void)
         }
     }
 
-    printk("SPI worker online\n");
+    printk("Master Online (Precision Mode: Hardware Cycles)\n");
 
     while (1) {
-        int64_t now = k_uptime_get();
+        // Zeitstempel in us direkt vor dem Senden abrufen
+        uint64_t now_us = get_uptime_us();
 
-        for (uint8_t i = 0; i < 4; i++) {
-            int err = send_timestamp_to_slave(i, (uint64_t)now);
+        for (uint8_t i = 0; i < ARRAY_SIZE(cs_gpios); i++) {
+            int err = send_timestamp_to_slave(i, now_us);
             if (err) {
-                printk("Slave %d: send failed: %d\n", i, err);
+                printk("Slave %d: Error %d\n", i, err);
+            } else {
+                // Für deine Logs im Paper:
+                printk("Sent to Slave %d: %" PRIu64 " us\n", i, now_us);
             }
-            /* Give slaves time to re-arm (important for Zephyr SPI slave) */
-            k_msleep(100);
+            k_msleep(100); 
         }
 
         k_msleep(MASTER_SYNC_INTERVAL_MS);
