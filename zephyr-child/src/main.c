@@ -10,6 +10,13 @@
 #define SPI_DEV_NODE DT_NODELABEL(spi1)
 #define SYNC_PIN_NODE DT_ALIAS(sw0) 
 
+/* --- Data Structure for Reporting (20 Bytes) --- */
+struct slave_report {
+    uint32_t id;
+    int64_t  offset_us;
+    uint64_t synced_time_us;
+} __attribute__((packed));
+
 static const struct gpio_dt_spec sync_pin = GPIO_DT_SPEC_GET(SYNC_PIN_NODE, gpios);
 static struct gpio_callback sync_cb_data;
 static struct k_sem sync_sem;
@@ -34,10 +41,14 @@ void sync_callback(const struct device *port, struct gpio_callback *cb, uint32_t
     k_sem_give(&sync_sem);
 }
 
+/* SPI Buffers updated for Full Duplex Reporting */
 static uint8_t rx_data[8] __aligned(4);
-static uint8_t tx_dummy[8] __aligned(4);
+static struct slave_report tx_report __aligned(4); // We send this back to Master
+
 static struct spi_buf rx_buf = { .buf = rx_data, .len = 8 };
-static struct spi_buf tx_buf = { .buf = tx_dummy, .len = 8 };
+/* TX buffer length is now 20 bytes to send the full report */
+static struct spi_buf tx_buf = { .buf = &tx_report, .len = sizeof(struct slave_report) };
+
 static struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
 static struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
 
@@ -56,13 +67,21 @@ int main(void) {
     gpio_init_callback(&sync_cb_data, sync_callback, BIT(sync_pin.pin));
     gpio_add_callback(sync_pin.port, &sync_cb_data);
 
+    /* Initialize the report with dummy data for the first cycle */
+    tx_report.id = CHILD_ID;
+    tx_report.offset_us = 0;
+    tx_report.synced_time_us = 0;
+
     int sync_count = 0;
     while (sync_count < 1000) {
         /* Block until Master sends hardware trigger pulse */
         k_sem_take(&sync_sem, K_FOREVER);
         
-        /* Receive Master Timestamp via SPI */
+        /* Receive Master Timestamp via SPI AND Send Previous Report simultaneously */
         if (spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set) >= 0) {
+            
+            /* --- TIME CRITICAL PART DONE --- */
+            
             uint64_t master_ts_us = 0;
             for (int i = 0; i < 8; i++) master_ts_us = (master_ts_us << 8) | rx_data[i];
 
@@ -84,19 +103,14 @@ int main(void) {
                 clock_offset_us = (int64_t)master_ts_us - (int64_t)latched_local_us;
             #endif
 
-            sync_count++;
-            
-            double offset_ms = (double)diff_us / 1000.0;
-            int32_t ms_int = (int32_t)offset_ms;
-            uint32_t ms_frac = (uint32_t)(llabs((int64_t)((offset_ms - ms_int) * 1000000.0)));
-            
-            double synced_uptime_ms = (double)get_synced_uptime_us() / 1000.0;
-            uint32_t synced_ms_int = (uint32_t)synced_uptime_ms;
-            uint32_t synced_ms_frac = (uint32_t)((synced_uptime_ms - synced_ms_int) * 1000000.0);
+            /* PREPARE REPORT FOR NEXT CYCLE */
+            /* Instead of printk, we fill the struct. The hardware will send this
+               automatically the next time the Master toggles our Chip Select. */
+            tx_report.id = CHILD_ID;
+            tx_report.offset_us = diff_us;
+            tx_report.synced_time_us = local_ref_us;
 
-            printk("CHILD %d offset: %s%d.%06u ms | synced: %u.%06u ms\n", 
-                   CHILD_ID, (offset_ms < 0 && ms_int == 0) ? "-" : "", ms_int, ms_frac, 
-                   synced_ms_int, synced_ms_frac);
+            sync_count++;
         }
     }
     return 0;
