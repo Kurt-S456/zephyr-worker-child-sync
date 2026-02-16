@@ -18,8 +18,8 @@
     pinctrl-0 = <&spi1_sck_master_pa5 &spi1_miso_master_pa6 &spi1_mosi_master_pa7>;
     pinctrl-names = "default";
     
-    cs-gpios = <&gpiob 0 GPIO_ACTIVE_LOW>,   /* Slave 0 */
+    cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>,   /* Slave 0 */
                <&gpiob 1 GPIO_ACTIVE_LOW>,   /* Slave 1 */
                <&gpiob 10 GPIO_ACTIVE_LOW>,  /* Slave 2 */
-               <&gpioa 4 GPIO_ACTIVE_LOW>;   /* Slave 3 */
+               <&gpiob 0 GPIO_ACTIVE_LOW>;   /* Slave 3 */
 };
