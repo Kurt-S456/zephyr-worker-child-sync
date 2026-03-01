@@ -71,7 +71,7 @@ int main(void)
         gpio_pin_set_dt(&sync_out, 1);
         uint64_t now_us = get_uptime_us(); 
         gpio_pin_set_dt(&sync_out, 0);
-
+        k_msleep(10);
         printk("Global Sync Pulse sent: %" PRIu64 " us\n", now_us);
 
         /* 2. Sequential Data Delivery */
