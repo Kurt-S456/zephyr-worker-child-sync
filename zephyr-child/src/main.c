@@ -55,7 +55,7 @@ int main(void) {
     gpio_pin_interrupt_configure_dt(&sync_pin, GPIO_INT_EDGE_TO_ACTIVE);
     gpio_init_callback(&sync_cb_data, sync_callback, BIT(sync_pin.pin));
     gpio_add_callback(sync_pin.port, &sync_cb_data);
-
+    printk("*** CHILD %d BOOTED AND READY ***\n", CHILD_ID);
     int sync_count = 0;
     while (sync_count < 1000) {
         /* Block until Master sends hardware trigger pulse */
