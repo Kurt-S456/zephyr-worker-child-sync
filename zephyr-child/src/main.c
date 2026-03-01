@@ -86,17 +86,12 @@ int main(void) {
 
             sync_count++;
             
-            double offset_ms = (double)diff_us / 1000.0;
-            int32_t ms_int = (int32_t)offset_ms;
-            uint32_t ms_frac = (uint32_t)(llabs((int64_t)((offset_ms - ms_int) * 1000000.0)));
-            
             double synced_uptime_ms = (double)get_synced_uptime_us() / 1000.0;
             uint32_t synced_ms_int = (uint32_t)synced_uptime_ms;
             uint32_t synced_ms_frac = (uint32_t)((synced_uptime_ms - synced_ms_int) * 1000000.0);
 
-            printk("CHILD %d offset: %s%d.%06u ms | synced: %u.%06u ms\n", 
-                   CHILD_ID, (offset_ms < 0 && ms_int == 0) ? "-" : "", ms_int, ms_frac, 
-                   synced_ms_int, synced_ms_frac);
+            printk("CHILD %d offset: %" PRId64 " us | synced: %u.%06u ms\n", 
+                   CHILD_ID, diff_us, synced_ms_int, synced_ms_frac);
         }
     }
     return 0;
