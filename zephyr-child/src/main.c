@@ -55,16 +55,47 @@ int main(void) {
     gpio_pin_interrupt_configure_dt(&sync_pin, GPIO_INT_EDGE_TO_ACTIVE);
     gpio_init_callback(&sync_cb_data, sync_callback, BIT(sync_pin.pin));
     gpio_add_callback(sync_pin.port, &sync_cb_data);
+
+    if (!device_is_ready(spi_dev)) {
+        printk("SPI device not ready\n");
+        return 0;
+    }
+    if (!gpio_is_ready_dt(&sync_pin)) {
+        printk("Sync GPIO not ready\n");
+        return 0;
+    }
+
     printk("*** CHILD %d BOOTED AND READY ***\n", CHILD_ID);
     int sync_count = 0;
     while (sync_count < 1000) {
-        /* Block until Master sends hardware trigger pulse */
-        k_sem_take(&sync_sem, K_FOREVER);
+        /* Prepare a small hardcoded payload to send back to Master */
+        static uint32_t tx_seq = 0;
+        tx_seq++;
+        tx_dummy[0] = 0xDE;
+        tx_dummy[1] = 0xAD;
+        tx_dummy[2] = 0xBE;
+        tx_dummy[3] = 0xEF;
+        tx_dummy[4] = (uint8_t)CHILD_ID;
+        tx_dummy[5] = (uint8_t)((tx_seq >> 8) & 0xFF);
+        tx_dummy[6] = (uint8_t)(tx_seq & 0xFF);
+        tx_dummy[7] = 0x01;
+
+
+        int err = spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set);
+        if (err >= 0) {
+
+        } else {
+            printk("SPI transceive error: %d\n", err);
+        }
         
-        /* Receive Master Timestamp via SPI */
-        if (spi_transceive(spi_dev, &slave_cfg, &tx_set, &rx_set) >= 0) {
+        if (err >= 0) {
+            /* Block until Master sends hardware trigger pulse */
+            if (k_sem_take(&sync_sem, K_NO_WAIT) == 0) {
+                /* Successfully latched local time at interrupt, now process received data */
             uint64_t master_ts_us = 0;
-            for (int i = 0; i < 8; i++) master_ts_us = (master_ts_us << 8) | rx_data[i];
+            for (int i = 0; i < 8; i++) {
+                master_ts_us = (master_ts_us << 8) | rx_data[i];
+            } 
 
             /* Calculate reference time at the exact moment of the interrupt */
             uint64_t local_ref_us = (sync_count == 0) ? 
@@ -84,15 +115,19 @@ int main(void) {
                 clock_offset_us = (int64_t)master_ts_us - (int64_t)latched_local_us;
             #endif
 
-            sync_count++;
-            
-            double synced_uptime_ms = (double)get_synced_uptime_us() / 1000.0;
-            uint32_t synced_ms_int = (uint32_t)synced_uptime_ms;
-            uint32_t synced_ms_frac = (uint32_t)((synced_uptime_ms - synced_ms_int) * 1000000.0);
+                 sync_count++;
 
-            printk("CHILD %d offset: %" PRId64 " us | synced: %u.%06u ms\n", 
-                   CHILD_ID, diff_us, synced_ms_int, synced_ms_frac);
+                 double synced_uptime_ms = (double)get_synced_uptime_us() / 1000.0;
+                 uint32_t synced_ms_int = (uint32_t)synced_uptime_ms;
+                 uint32_t synced_ms_frac = (uint32_t)((synced_uptime_ms - synced_ms_int) * 1000000.0);
+
+                 printk("CHILD %d offset: %" PRId64 " us | synced: %u.%06u ms\n", 
+                     CHILD_ID, diff_us, synced_ms_int, synced_ms_frac);
+            } else {
+                printk("CHILD %d: No sync pulse received, skipping offset update\n", CHILD_ID);
+            }    
         }
+            
     }
     return 0;
 }

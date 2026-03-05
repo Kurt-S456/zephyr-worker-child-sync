@@ -30,14 +30,14 @@ static inline uint64_t get_uptime_us(void) {
 static uint8_t tx_data[8] __aligned(4);
 static uint8_t rx_dummy[8] __aligned(4);
 
-static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp_us)
+static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp_us, uint8_t *out_rx)
 {
     for (int i = 0; i < 8; i++) {
         tx_data[i] = (uint8_t)(timestamp_us >> (56 - (i * 8)));
     }
 
     struct spi_buf tx_buf = { .buf = tx_data,  .len = 8 };
-    struct spi_buf rx_buf = { .buf = rx_dummy, .len = 8 };
+    struct spi_buf rx_buf = { .buf = out_rx ? out_rx : rx_dummy, .len = 8 };
     struct spi_buf_set txs = { .buffers = &tx_buf, .count = 1 };
     struct spi_buf_set rxs = { .buffers = &rx_buf, .count = 1 };
 
@@ -52,7 +52,19 @@ static int send_timestamp_to_slave(uint8_t slave_id, uint64_t timestamp_us)
         .cs = cs_ctrl,
     };
 
-    return spi_transceive(spi_dev, &cfg, &txs, &rxs);
+
+    int ret = spi_transceive(spi_dev, &cfg, &txs, &rxs);
+
+    /* Debug: print immediate RX buffer and return code */
+    uint8_t *rxp = out_rx ? out_rx : rx_dummy;
+    printk("Master <- Child %d ret=%d RX:", slave_id, ret);
+    for (int i = 0; i < 8; i++) {
+        printk(" %02x", rxp[i]);
+         k_msleep(5);
+    } 
+    printk("\n");
+
+    return ret;
 }
 
 int main(void)
@@ -61,7 +73,8 @@ int main(void)
     gpio_pin_configure_dt(&sync_out, GPIO_OUTPUT_INACTIVE);
 
     for (int i = 0; i < ARRAY_SIZE(cs_gpios); i++) {
-        gpio_is_ready_dt(&cs_gpios[i]);
+        bool ready = gpio_is_ready_dt(&cs_gpios[i]);
+        printk("CS[%d] gpio ready: %d (port=%p pin=%d)\n", i, ready, cs_gpios[i].port, cs_gpios[i].pin);
     }
 
     printk("Worker Broadcast Online. Interval: %d ms\n", MASTER_SYNC_INTERVAL_MS);
@@ -71,15 +84,30 @@ int main(void)
         gpio_pin_set_dt(&sync_out, 1);
         uint64_t now_us = get_uptime_us(); 
         gpio_pin_set_dt(&sync_out, 0);
-        k_msleep(10);
-        printk("Global Sync Pulse sent: %" PRIu64 " us\n", now_us);
+        k_msleep(100);
+        /* 2. Sequential Data Delivery: collect each child's response into an array */
+        static uint8_t collected_rx[ARRAY_SIZE(cs_gpios)][8] __aligned(4);
+        static int results[ARRAY_SIZE(cs_gpios)];
 
-        /* 2. Sequential Data Delivery */
+
         for (uint8_t i = 0; i < ARRAY_SIZE(cs_gpios); i++) {
-            if (send_timestamp_to_slave(i, now_us) == 0) {
-                printk("Sync delivered to Child %d: %" PRIu64 " us\n", i, now_us);
+            results[i] = send_timestamp_to_slave(i, now_us, collected_rx[i]);
+        }
+
+        /* 3. In-between-interval printing: print pulse + all received buffers here */
+        printk("Global Sync Pulse sent: %" PRIu64 " us\n", now_us);
+        for (uint8_t i = 0; i < ARRAY_SIZE(cs_gpios); i++) {
+            if (results[i] == 0) {
+                printk("Recv from Child %d:", i);
+                k_msleep(5);
+                for (int j = 0; j < 8; j++) {
+                    printk(" %02x", collected_rx[i][j]);
+                    k_msleep(5);
+                }
+                printk("\n");
+            } else {
+                printk("Child %d: transfer failed (ret=%d)\n", i, results[i]);
             }
-            k_msleep(10); 
         }
 
         k_msleep(MASTER_SYNC_INTERVAL_MS);
